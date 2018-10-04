@@ -6,7 +6,11 @@ set -e
 exec 3>&1 # make stdout available as fd 3 for the result
 exec 1>&2 # redirect all output to stderr for logging
 
+echo "Running in script"
+
 source $(dirname $0)/common.sh
+
+echo "common.sh ran"
 
 destination=$1
 
@@ -132,7 +136,7 @@ commit_not_signed() {
 #Get access token
 
 ACCESS_TOKEN=`curl -X POST -u "${bitbucket_key}:${bitbucket_secret}" https://bitbucket.org/site/oauth2/access_token \
--d grant_type=client_credentials | jq '.access_token'`
+-d grant_type=client_credentials -k | jq '.access_token'`
 
 #Post status to bitbucket including state, build key and url of the building pipeline
 
@@ -140,10 +144,11 @@ BUILD_URL="${concourse_url}/teams/${BUILD_TEAM_NAME}/pipelines/${BUILD_PIPELINE_
 BUILD_STATUS='{"state":"INPROGRESS","key":"concourse-'${BUILD_JOB_NAME}'", "url":"'${BUILD_URL}'"}'
 BITBUCKET_BUILD_URL="${bitbucket_host}/${bitbucket_api_version}/repositories/${bitbucket_team_name}/${bitbucket_repo_name}/commit/${ref}/statuses/build"
 
-curl -X POST $(BITBUCKET_BUILD_URL) \
+curl -X POST ${BITBUCKET_BUILD_URL} \
 --header "Content-Type: application/json" \
 --header "Authorization: Bearer ${ACCESS_TOKEN}" \
---data "${BUILD_STATUS}"
+--data "${BUILD_STATUS}" \
+-k
 
 if [ ! -z "${commit_verification_keys}" ] || [ ! -z "${commit_verification_key_ids}" ] ; then
   if [ ! -z "${commit_verification_keys}" ]; then
