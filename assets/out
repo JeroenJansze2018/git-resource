@@ -1,6 +1,7 @@
 #!/bin/bash
 # vim: set ft=sh
 
+#The out-script updates the pr state to either failed or successful based on output from the concourse job.
 set -e
 
 exec 3>&1 # make stdout available as fd 3 for the result
@@ -15,14 +16,14 @@ if [ -z "$source" ]; then
   exit 1
 fi
 
-cd $source
-
 # for jq
 PATH=/usr/local/bin:$PATH
 
 payload=$(mktemp $TMPDIR/git-resource-request.XXXXXX)
 
 cat > $payload <&0
+
+echo "payload: " $payload
 
 load_pubkey $payload
 configure_https_tunnel $payload
@@ -31,7 +32,6 @@ configure_credentials $payload
 
 concourse_url=$(jq -r '.source.concourse_url // ""' < $payload)
 uri=$(jq -r '.source.uri // ""' < $payload)
-branch=$(jq -r '.source.branch // ""' < $payload)
 git_config_payload=$(jq -r '.source.git_config // []' < $payload)
 build_state=$(jq -r '.params.state // ""' < $payload)
 build_path=$(jq -r '.params.build_path // ""' < $payload)
@@ -42,22 +42,24 @@ bitbucket_api_version=$(jq -r '.source.bitbucket_api_version // ""' < $payload)
 bitbucket_team_name=$(jq -r '.source.bitbucket_team_name // ""' < $payload)
 bitbucket_repo_name=$(jq -r '.source.bitbucket_repo_name // ""' < $payload)
 
-#Update Bitbucket
-
+#Update pr status in bitbucket
+#cd to the place where the repo is stored by the in-script
+cd $source
 cd $build_path
+
+#Fetch the reference that is used to update bitbucket and the metadata for output in concourse UI
 current_ref=$(git rev-parse HEAD)
+metadata=$(git_metadata)
 
 #Get access token
-
 ACCESS_TOKEN=`curl -X POST -u "${bitbucket_key}:${bitbucket_secret}" https://bitbucket.org/site/oauth2/access_token \
 -d grant_type=client_credentials -k | jq '.access_token'`
 
 #Post status to bitbucket including state, build key and url of the building pipeline
-
 BUILD_URL="${concourse_url}/teams/${BUILD_TEAM_NAME}/pipelines/${BUILD_PIPELINE_NAME}/jobs/${BUILD_JOB_NAME}/builds/${BUILD_NAME}"
 
-update_state=""
-
+#Checks if the status is succesful or failed or still in progress.
+update_state=""#Might not be needed if the job params are specified as bitbucket upda
 if [ $build_state == "success" ]; then
     update_state="SUCCESSFUL"
 elif [ $build_state == "failed" ]; then
@@ -78,3 +80,8 @@ curl -X POST ${BITBUCKET_BUILD_URL} \
 --header "Authorization: Bearer ${ACCESS_TOKEN}" \
 --data "${BUILD_STATUS}" \
 -k
+
+jq -n "{
+  version: {ref: $(echo $current_ref | jq -R .)},
+  metadata: $metadata
+}" >&3

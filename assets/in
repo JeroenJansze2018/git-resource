@@ -1,6 +1,12 @@
 #!/bin/bash
 # vim: set ft=sh
 
+#The in-script recieves a new version from consource which is output from the check script
+#Then this script will clone the repository and checkout the branch on which that new version is present.
+#The cloned repo will be stored in the location concourse provides.
+#Bitbucket will be updated so that the current PR shows INPROGRESS state.
+#Furthermore the version and metadata returned.
+
 set -e
 
 exec 3>&1 # make stdout available as fd 3 for the result
@@ -10,11 +16,10 @@ echo "Running in script"
 
 source $(dirname $0)/common.sh
 
-echo "common.sh ran"
-
+#Destination is given by concourse and is the place where the branch needs to be stored for testing
 destination=$1
 
-if [ -z "$destination" ]; then
+if [ -z "$destination" ]; then #Might not be needed, came for the original script
   echo "usage: $0 <path/to/destination>" >&2
   exit 1
 fi
@@ -22,6 +27,7 @@ fi
 # for jq
 PATH=/usr/local/bin:$PATH
 
+#Loads inputs for in script
 payload=$(mktemp $TMPDIR/git-resource-request.XXXXXX)
 
 cat > $payload <&0
@@ -40,7 +46,6 @@ bitbucket_api_version=$(jq -r '.source.bitbucket_api_version // ""' < $payload)
 bitbucket_team_name=$(jq -r '.source.bitbucket_team_name // ""' < $payload)
 bitbucket_repo_name=$(jq -r '.source.bitbucket_repo_name // ""' < $payload)
 uri=$(jq -r '.source.uri // ""' < $payload)
-branch=$(jq -r '.source.branch // ""' < $payload)
 git_config_payload=$(jq -r '.source.git_config // []' < $payload)
 ref=$(jq -r '.version.ref // "HEAD"' < $payload)
 depth=$(jq -r '(.params.depth // 0)' < $payload)
@@ -63,17 +68,8 @@ if [ -z "$uri" ]; then
   exit 1
 fi
 
-branchflag=""
-if [ -n "$branch" ]; then
-  branchflag="--branch $branch"
-fi
-
-depthflag=""
-if test "$depth" -gt 0 2> /dev/null; then
-  depthflag="--depth $depth"
-fi
-
-git clone --single-branch $depthflag $uri $branchflag $destination
+#Clone complete repo and cd into it
+git clone $depthflag $uri $destination
 
 cd $destination
 
@@ -90,7 +86,9 @@ git fetch origin refs/notes/*:refs/notes/*
 # In either case we try to deepen the shallow clone until we find $ref, reach
 # the max depth of the repo, or give up after a given depth and resort to deep
 # clone.
-if [ "$depth" -gt 0 ]; then
+
+#It is possible that not the whole repo is cloned but only till a certain depth
+if [ "$depth" -gt 0 ]; then #Currently this is not taken advantage of but might be used for optimization later
   readonly max_depth=128
 
   d="$depth"
@@ -118,6 +116,8 @@ if [ "$depth" -gt 0 ]; then
   done
 fi
 
+#Important
+#Checkout the version that concourse specified (which is a version specified by the output of the check script)
 git checkout -q $ref
 
 invalid_key() {
@@ -131,18 +131,17 @@ commit_not_signed() {
   exit 1
 }
 
-#Update Bitbucket
-
+#Update Bitbucket to put the build for the branch for this PR into INPROGRESS state
 #Get access token
-
 ACCESS_TOKEN=`curl -X POST -u "${bitbucket_key}:${bitbucket_secret}" https://bitbucket.org/site/oauth2/access_token \
 -d grant_type=client_credentials -k | jq '.access_token'`
 
 #Post status to bitbucket including state, build key and url of the building pipeline
-
 BUILD_URL="${concourse_url}/teams/${BUILD_TEAM_NAME}/pipelines/${BUILD_PIPELINE_NAME}/jobs/${BUILD_JOB_NAME}/builds/${BUILD_NAME}"
 BUILD_STATUS='{"state":"INPROGRESS","key":"concourse-'${BUILD_JOB_NAME}'", "url":"'${BUILD_URL}'"}'
 BITBUCKET_BUILD_URL="${bitbucket_host}/${bitbucket_api_version}/repositories/${bitbucket_team_name}/${bitbucket_repo_name}/commit/${ref}/statuses/build"
+
+echo "$BITBUCKET_BUILD_URL"
 
 curl -X POST ${BITBUCKET_BUILD_URL} \
 --header "Content-Type: application/json" \
@@ -150,7 +149,8 @@ curl -X POST ${BITBUCKET_BUILD_URL} \
 --data "${BUILD_STATUS}" \
 -k
 
-if [ ! -z "${commit_verification_keys}" ] || [ ! -z "${commit_verification_key_ids}" ] ; then
+#There is a possibility for commit signing
+if [ ! -z "${commit_verification_keys}" ] || [ ! -z "${commit_verification_key_ids}" ] ; then #Currently not taken into account
   if [ ! -z "${commit_verification_keys}" ]; then
     echo "${commit_verification_keys}" | gpg --batch --import || invalid_key "${commit_verification_keys}"
   fi
@@ -161,22 +161,25 @@ if [ ! -z "${commit_verification_keys}" ] || [ ! -z "${commit_verification_key_i
   git verify-commit $(git rev-list -n 1 $ref) || commit_not_signed
 fi
 
-if [ "$disable_git_lfs" != "true" ]; then
+#Possibility for using git large file storage
+if [ "$disable_git_lfs" != "true" ]; then #Currently not taken into account
   git lfs fetch
   git lfs checkout
 fi
 
-git log -1 --oneline
+#Make sure that we have a clean checkcout of the branch
+git log -1 --oneline #Unclear why this is needed
 git clean --force --force -d
 git submodule sync
 
-if [ -f $GIT_CRYPT_KEY_PATH ]; then
+#Possibility for encrypting/decrypting git repos
+if [ -f $GIT_CRYPT_KEY_PATH ]; then #Currently not taken into account
   echo "unlocking git repo"
   git-crypt unlock $GIT_CRYPT_KEY_PATH
 fi
 
-
-submodule_parameters=""
+#Possibility to only fetch submodules instead of the whole repo
+submodule_parameters=""#Currently not used but might be useful for optimization.
 if [ "$submodule_remote" != "false" ]; then
     submodule_parameters+=" --remote "
 fi
@@ -202,6 +205,7 @@ for branch in $fetch; do
   git branch $branch FETCH_HEAD
 done
 
+#If ref is not the last commit take the last commit
 if [ "$ref" == "HEAD" ]; then
   return_ref=$(git rev-parse HEAD)
 else
@@ -226,11 +230,19 @@ echo "${return_ref}" | cut -c1-7 | awk "{ printf \"${short_ref_format}\", \$1 }"
 # for example
 git log -1 --format=format:%B > .git/commit_message
 
+#Fetch all metadata for this commit. See function in commons.sh
 metadata=$(git_metadata)
 
-if [ "$clean_tags" == "true" ]; then
+#Possibility to remove all tags
+if [ "$clean_tags" == "true" ]; then #Currently not taken into account
   git tag | xargs git tag -d
 fi
+
+#Log and return the output in proper format to stdout
+echo "in-output: "$(jq -n "{
+  version: {ref: $(echo $return_ref | jq -R .)},
+  metadata: $metadata
+}")
 
 jq -n "{
   version: {ref: $(echo $return_ref | jq -R .)},

@@ -1,16 +1,23 @@
 #!/bin/bash
 # vim: set ft=sh
 
+#This script checks if there are newer changes on specific directories, in pullrequests that have state open.
+#It returns the current version and all other newer commits in a list, with the current version on top.
+#Concourse will skip the first element in that list.
+
 set -e
 
 exec 3>&1 # make stdout available as fd 3 for the result
 exec 1>&2 # redirect all output to stderr for logging
+exec &>> /tmp/check-logfile #Logging for the check script can only be seen by sending it to a file,
+                            #login to the concourse container and checking the file
 
 source $(dirname $0)/common.sh
 
 # for jq
 PATH=/usr/local/bin:$PATH
 
+#Gets all input information for the check script
 payload=$TMPDIR/git-resource-request
 
 cat > $payload <&0
@@ -20,68 +27,170 @@ configure_https_tunnel $payload
 configure_git_ssl_verification $payload
 configure_credentials $payload
 
+concourse_url=$(jq -r '.source.concourse_url // ""' < $payload)
+bitbucket_key=$(jq -r '.source.bitbucket_key // ""' < $payload)
+bitbucket_secret=$(jq -r '.source.bitbucket_secret // ""' < $payload)
+bitbucket_host=$(jq -r '.source.bitbucket_host // ""' < $payload)
+bitbucket_api_version=$(jq -r '.source.bitbucket_api_version // ""' < $payload)
+bitbucket_team_name=$(jq -r '.source.bitbucket_team_name // ""' < $payload)
+bitbucket_repo_name=$(jq -r '.source.bitbucket_repo_name // ""' < $payload)
 uri=$(jq -r '.source.uri // ""' < $payload)
-branch=$(jq -r '.source.branch // ""' < $payload)
 paths="$(jq -r '(.source.paths // ["."])[]' < $payload)" # those "'s are important
 ignore_paths="$(jq -r '":!" + (.source.ignore_paths // [])[]' < $payload)" # these ones too
 tag_filter=$(jq -r '.source.tag_filter // ""' < $payload)
 git_config_payload=$(jq -r '.source.git_config // []' < $payload)
 ref=$(jq -r '.version.ref // ""' < $payload)
 skip_ci_disabled=$(jq -r '.source.disable_ci_skip // false' < $payload)
-
 configure_git_global "${git_config_payload}"
 
+#Temporary destination to clone repo's and check if there are newer versions
 destination=$TMPDIR/git-resource-repo-cache
 
-if [ -d $destination ]; then
-  cd $destination
-  git fetch
-  git reset --hard FETCH_HEAD
+#Check PR's on Bitbucket
+#Get access token
+ACCESS_TOKEN=$(curl -X POST -u "${bitbucket_key}:${bitbucket_secret}" https://bitbucket.org/site/oauth2/access_token \
+-d grant_type=client_credentials -k | jq '.access_token')
+
+echo "Access token retrieved" >> /tmp/logfile
+
+#Get all pullrequest from bitbucket
+BITBUCKET_PRS_URL="${bitbucket_host}/${bitbucket_api_version}/repositories/${bitbucket_team_name}/${bitbucket_repo_name}/pullrequests"
+
+echo "URL for retrieving prs: "$BITBUCKET_PRS_URL >> /tmp/logfile
+
+bitbucket_prs=$(curl -X GET ${BITBUCKET_BUILD_URL} \
+--header "Content-Type: application/json" \
+--header "Authorization: Bearer ${ACCESS_TOKEN}" \
+-k)
+
+echo "current prs: $bitbucket_prs" >> /tmp/logfile
+
+#references is used to save all references that need to be in the output of the check script.
+references=""
+
+#If no current version is given use the last master commit as the current version.
+#This assumes that there is at least one master commit which is safe for a mono repo.
+if [ -n "$ref" ]; then
+    BITBUCKET_COMMITS_URL="${bitbucket_host}/${bitbucket_api_version}/repositories/${bitbucket_team_name}/${bitbucket_repo_name}/commits/master"
+
+    master_commits=$(curl -X GET ${BITBUCKET_COMMITS_URL} \
+    --header "Content-Type: application/json" \
+    --header "Authorization: Bearer ${ACCESS_TOKEN}" \
+    -k)
+
+    references=$(echo "$master_commits" | jq '.values' | jq '.[0]' | jq '.hash')$'\n'
 else
-  branchflag=""
-  if [ -n "$branch" ]; then
-    branchflag="--branch $branch"
-  fi
-
-  git clone --single-branch $uri $branchflag $destination
-  cd $destination
+    references=$ref$'\n'
 fi
 
-if [ -n "$ref" ] && git cat-file -e "$ref"; then
-  init_commit=$(git rev-list --max-parents=0 HEAD)
-  if [ "${ref}" = "${init_commit}" ]; then
-    log_range="--reverse HEAD"
-  else
-    log_range="--reverse ${ref}~1..HEAD"
-  fi
-else
-  log_range="-1"
-  ref=""
-fi
+#branch is a variable that keeps track of which branch to clone and check for updates
+branch=""
 
-if [ "$paths" = "." ] && [ -z "$ignore_paths" ]; then
-  paths_search=""
-else
-  paths_search="-- $paths $ignore_paths"
-fi
+#As git checkout changes the work directory we need to be able to find the original work directory for the next branch
+original_workdir="$(pwd)"
 
-ci_skip=""
-if [ "$skip_ci_disabled" != "true" ]; then
-  ci_skip="--grep \\[ci\\sskip\\] --grep \\[skip\\sci\\] --invert-grep"
-fi
+#Checking all the prs to see if there are any updates on them compared to either the last master commit or the last version
+for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
 
-if [ -n "$tag_filter" ]; then
-  {
-    if [ -n "$ref" ]; then
-      git tag --list "$tag_filter" --sort=creatordate --contains $ref
-    else
-      git tag --list "$tag_filter" --sort=creatordate | tail -1
+    _jq() {
+        echo ${row} | base64 -d | jq -r ${1}
+    }
+
+    echo "Currently checking pr: $(_jq '.')"
+
+    #Only prs with state open are checked (other states are merged, declined or superseded)
+    if [ "$(_jq '.state')" = "OPEN" ]; then
+
+        #Get the branch name to be used to clone it
+        branch="$(_jq '.source.branch.name')"
+
+        cd $original_workdir
+
+        echo "branch: "$branch  >> /tmp/logfile
+
+        if [ -d $destination ]; then #if-block might be removed as destination will never be a dir at this point
+
+            echo "destination is a dir"  >> /tmp/logfile
+
+            cd $destination
+            git fetch
+            git reset --hard FETCH_HEAD
+
+            echo "destination is a dir"  >> /tmp/logfile
+
+        else
+            branchflag=""
+            if [ -n "$branch" ]; then
+                branchflag="--branch $branch"
+            fi
+
+            echo "destination does not exist as a dir and branchflag is: "$branchflag  >> /tmp/logfile
+
+            #Clone the branch and cd into it
+            git clone --single-branch $uri $branchflag $destination
+            cd $destination
+        fi
+
+        echo "Cloning done"  >> /tmp/logfile
+
+        #This variable set to -1 makes sure that only the last commit is taken from a branch
+        log_range="-1" #might be simplified with HEAD
+
+        #Important block
+        #This decides whether or not a certain update commit should be in the output based on if there are changes in a certain directory
+        if [ "$paths" = "." ] && [ -z "$ignore_paths" ]; then
+            paths_search=""
+        else
+            paths_search="-- $paths $ignore_paths"
+        fi
+
+        echo "paths set: "$paths_search  >> /tmp/logfile
+
+        #Option to not run CI
+        ci_skip="" #Will not be needed might be removed.
+        if [ "$skip_ci_disabled" != "true" ]; then
+            ci_skip="--grep \\[ci\\sskip\\] --grep \\[skip\\sci\\] --invert-grep"
+        fi
+
+        echo "ci_skip set"  >> /tmp/logfile
+
+        #Checks if tags should be used to find new updates
+        if [ -n "$tag_filter" ]; then #Will not be used might be removed.
+            {
+                if [ -n "$ref" ]; then
+                    git tag --list "$tag_filter" --sort=creatordate --contains $ref
+                else
+                    git tag --list "$tag_filter" --sort=creatordate | tail -1
+                fi
+            } | jq -R '.' | jq -s "map({ref: .})" >&3
+        else
+            {
+                #If references is currently empty do not put an new line first else do
+                if [ "$references" = "" ]; then #At this point references cannot be empty and might be removed.
+                    set -f
+                    references=$(git log $ci_skip --format='%H' --first-parent $log_range $paths_search)
+                    set +f
+                else
+                    set -f
+                    #Checks if there are updates if not this will return current version or last master commit
+                    references_update=$(git log $ci_skip --format='%H' --first-parent $log_range $paths_search)
+
+                    #Checks if the new version is not already added to references to make sure we dont run the same branch revision twice
+                    if [[ $references != *"$references_update"* ]]; then
+                       references=$references$'\n'
+                       references=$references$references_update
+                    fi
+                    set +f
+                fi
+            }
+        fi
+
+        echo "refs updated: $references" >> /tmp/logfile
+
+        #Remove current branch to make sure there is room for the next
+        rm -rf $destination
     fi
-  } | jq -R '.' | jq -s "map({ref: .})" >&3
-else
-  {
-    set -f
-    git log $ci_skip --format='%H' --first-parent $log_range $paths_search
-    set +f
-  } | jq -R '.' | jq -s "map({ref: .})" >&3
-fi
+done
+
+#Send output to stdout
+echo "$references" | jq -R '.' | jq -s "map({ref: .})" >&3
