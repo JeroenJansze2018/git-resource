@@ -11,7 +11,6 @@ exec 3>&1 # make stdout available as fd 3 for the result
 exec 1>&2 # redirect all output to stderr for logging
 exec &>> /tmp/check-logfile #Logging for the check script can only be seen by sending it to a file,
                             #login to the concourse container and checking the file
-
 source $(dirname $0)/common.sh
 
 # for jq
@@ -126,7 +125,7 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
 
             echo "refs updated: $references" >> /tmp/check-logfile
         fi
-        
+
         #Remove current branch to make sure there is room for the next
         rm -rf $destination
     fi
