@@ -58,7 +58,7 @@ BITBUCKET_PRS_URL="${bitbucket_host}/${bitbucket_api_version}/repositories/${bit
 
 echo "URL for retrieving prs: "$BITBUCKET_PRS_URL >> /tmp/logfile
 
-bitbucket_prs=$(curl -X GET ${BITBUCKET_BUILD_URL} \
+bitbucket_prs=$(curl -X GET ${BITBUCKET_PRS_URL} \
 --header "Content-Type: application/json" \
 --header "Authorization: Bearer ${ACCESS_TOKEN}" \
 -k)
