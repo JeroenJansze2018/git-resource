@@ -51,19 +51,19 @@ destination=$TMPDIR/git-resource-repo-cache
 ACCESS_TOKEN=$(curl -X POST -u "${bitbucket_key}:${bitbucket_secret}" https://bitbucket.org/site/oauth2/access_token \
 -d grant_type=client_credentials -k | jq '.access_token')
 
-echo "Access token retrieved" >> /tmp/logfile
+echo "Access token retrieved" >> /tmp/check-logfile
 
 #Get all pullrequest from bitbucket
 BITBUCKET_PRS_URL="${bitbucket_host}/${bitbucket_api_version}/repositories/${bitbucket_team_name}/${bitbucket_repo_name}/pullrequests"
 
-echo "URL for retrieving prs: "$BITBUCKET_PRS_URL >> /tmp/logfile
+echo "URL for retrieving prs: "$BITBUCKET_PRS_URL >> /tmp/check-logfile
 
 bitbucket_prs=$(curl -X GET ${BITBUCKET_PRS_URL} \
 --header "Content-Type: application/json" \
 --header "Authorization: Bearer ${ACCESS_TOKEN}" \
 -k)
 
-echo "current prs: $bitbucket_prs" >> /tmp/logfile
+echo "current prs: $bitbucket_prs" >> /tmp/check-logfile
 
 #references is used to save all references that need to be in the output of the check script.
 references=""
@@ -106,17 +106,17 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
 
         cd $original_workdir
 
-        echo "branch: "$branch  >> /tmp/logfile
+        echo "branch: "$branch  >> /tmp/check-logfile
 
         if [ -d $destination ]; then #if-block might be removed as destination will never be a dir at this point
 
-            echo "destination is a dir"  >> /tmp/logfile
+            echo "destination is a dir"  >> /tmp/check-logfile
 
             cd $destination
             git fetch
             git reset --hard FETCH_HEAD
 
-            echo "destination is a dir"  >> /tmp/logfile
+            echo "destination is a dir"  >> /tmp/check-logfile
 
         else
             branchflag=""
@@ -124,14 +124,14 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
                 branchflag="--branch $branch"
             fi
 
-            echo "destination does not exist as a dir and branchflag is: "$branchflag  >> /tmp/logfile
+            echo "destination does not exist as a dir and branchflag is: "$branchflag  >> /tmp/check-logfile
 
             #Clone the branch and cd into it
             git clone --single-branch $uri $branchflag $destination
             cd $destination
         fi
 
-        echo "Cloning done"  >> /tmp/logfile
+        echo "Cloning done"  >> /tmp/check-logfile
 
         #This variable set to -1 makes sure that only the last commit is taken from a branch
         log_range="-1" #might be simplified with HEAD
@@ -144,7 +144,7 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
             paths_search="-- $paths $ignore_paths"
         fi
 
-        echo "paths set: "$paths_search  >> /tmp/logfile
+        echo "paths set: "$paths_search  >> /tmp/check-logfile
 
         #Option to not run CI
         ci_skip="" #Will not be needed might be removed.
@@ -152,7 +152,7 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
             ci_skip="--grep \\[ci\\sskip\\] --grep \\[skip\\sci\\] --invert-grep"
         fi
 
-        echo "ci_skip set"  >> /tmp/logfile
+        echo "ci_skip set"  >> /tmp/check-logfile
 
         #Checks if tags should be used to find new updates
         if [ -n "$tag_filter" ]; then #Will not be used might be removed.
@@ -185,7 +185,7 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
             }
         fi
 
-        echo "refs updated: $references" >> /tmp/logfile
+        echo "refs updated: $references" >> /tmp/check-logfile
 
         #Remove current branch to make sure there is room for the next
         rm -rf $destination
