@@ -106,26 +106,27 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
 
         echo "paths set: "$paths_search  >> /tmp/check-logfile
 
-        #If references is currently empty do not put an new line first else do
-        if [ "$references" = "" ]; then #At this point references cannot be empty and might be removed.
-            set -f
-            references=$(git log $ci_skip --format='%H' --first-parent $log_range $paths_search)
-            set +f
-        else
-            set -f
-            #Checks if there are updates if not this will return current version or last master commit
-            references_update=$(git log $ci_skip --format='%H' --first-parent $log_range $paths_search)
+        potential_updates=$(git diff master...$branch $paths_search)
 
-            #Checks if the new version is not already added to references to make sure we dont run the same branch revision twice
-            if [[ $references != *"$references_update"* ]]; then
+        update=""
+        if [ -n "$potential_updates" ]; then
+            update="$(_jq '.source.commit.hash')"
+
+            #If references is currently empty do not put an new line first else do
+            if [ -n "$references" ]; then
+                set -f
                 references=$references$'\n'
-                references=$references$references_update
+                references=$references$update
+                set +f
+            else
+                set -f
+                references=$update
+                set +f
             fi
-            set +f
+
+            echo "refs updated: $references" >> /tmp/check-logfile
         fi
-
-        echo "refs updated: $references" >> /tmp/check-logfile
-
+        
         #Remove current branch to make sure there is room for the next
         rm -rf $destination
     fi
