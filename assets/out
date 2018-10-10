@@ -59,7 +59,7 @@ ACCESS_TOKEN=`curl -X POST -u "${bitbucket_key}:${bitbucket_secret}" https://bit
 BUILD_URL="${concourse_url}/teams/${BUILD_TEAM_NAME}/pipelines/${BUILD_PIPELINE_NAME}/jobs/${BUILD_JOB_NAME}/builds/${BUILD_NAME}"
 
 #Checks if the status is succesful or failed or still in progress.
-update_state=""#Might not be needed if the job params are specified as bitbucket upda
+update_state="" #Might not be needed if the job params are specified as bitbucket upda
 if [ $build_state == "success" ]; then
     update_state="SUCCESSFUL"
 elif [ $build_state == "failed" ]; then

@@ -61,6 +61,7 @@ bitbucket_prs=$(curl -X GET ${BITBUCKET_PRS_URL} \
 -k)
 
 echo "current prs: $bitbucket_prs" >> /tmp/check-logfile
+echo "current prs: $bitbucket_prs" >> /tmp/other-log
 
 #references is used to save all references that need to be in the output of the check script.
 references=""
@@ -74,6 +75,8 @@ original_workdir="$(pwd)"
 #Checking all the prs to see if there are any updates on them compared to either the last master commit or the last version
 for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
 
+    echo "LOOPING!" >> /tmp/other-log
+
     _jq() {
         echo ${row} | base64 -d | jq -r ${1}
     }
@@ -83,17 +86,19 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
     #Only prs with state open are checked (other states are merged, declined or superseded)
     if [ "$(_jq '.state')" = "OPEN" ]; then
 
-        #Get the branch name to be used to clone it
-        branch="$(_jq '.source.branch.name')"
-        branchflag="--branch $branch"
-
         cd $original_workdir
 
-        echo "branch: "$branch  >> /tmp/check-logfile
+        #Remove current branch to make sure there is room for the next
+        rm -rf $destination
 
-        #Clone the branch and cd into it
-        git clone --single-branch $uri $branchflag $destination
+        #Clone the repo and cd into it
+        git clone $uri $destination
         cd $destination
+
+        #Checkout branch of this pr
+        branch="$(_jq '.source.branch.name')"
+        echo "branch: "$branch  >> /tmp/check-logfile
+        git checkout $branch
 
         #Important block
         #This decides whether or not a certain update commit should be in the output based on if there are changes in a certain directory
@@ -105,7 +110,7 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
 
         echo "paths set: "$paths_search  >> /tmp/check-logfile
 
-        potential_updates=$(git diff master...$branch $paths_search)
+        potential_updates=$(git diff master... $paths_search)
 
         update=""
         if [ -n "$potential_updates" ]; then
@@ -125,9 +130,6 @@ for row in $(echo "${bitbucket_prs}" | jq '.values' | jq -r '.[] | @base64'); do
 
             echo "refs updated: $references" >> /tmp/check-logfile
         fi
-
-        #Remove current branch to make sure there is room for the next
-        rm -rf $destination
     fi
 done
 
